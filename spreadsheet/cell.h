@@ -3,34 +3,37 @@
 #include "common.h"
 #include "formula.h"
 
-#include <functional>
-#include <unordered_set>
-
-class Sheet;
 
 class Cell : public CellInterface {
 public:
-    Cell(Sheet& sheet);
+    Cell();
     ~Cell();
 
-    void Set(std::string text);
+    void Set(std::string text) override;
     void Clear();
 
     Value GetValue() const override;
     std::string GetText() const override;
-    std::vector<Position> GetReferencedCells() const override;
-
-    bool IsReferenced() const;
 
 private:
-    class Impl;
-    class EmptyImpl;
-    class TextImpl;
-    class FormulaImpl;
+    static const char FORMULA_SYMBOL = '=';
+    static const char ESCAPE_CHAR = '\'';
 
-    std::unique_ptr<Impl> impl_;
+    enum class CellType {
+        Empty,
+        Text,
+        Formula,
+        //Date, etc...
+    };
 
-    // Добавьте поля и методы для связи с таблицей, проверки циклических 
-    // зависимостей, графа зависимостей и т. д.
+    CellType type_ = CellType::Empty;
+    std::string data_;
+    std::unique_ptr<FormulaInterface> formula_handler_ = nullptr;
 
+    Value FormulaReturnConverter(const FormulaInterface::Value& formula_return) const;
+
+    // struct FormulaReturnConverter{
+    //     Value operator()(double formula_result) const;
+    //     Value operator()(FormulaError err) const;
+    // };
 };
