@@ -1,13 +1,16 @@
 #pragma once
 
-#include <deque>
+#include <algorithm>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 // Позиция ячейки. Индексация с нуля.
 struct Position {
@@ -27,6 +30,20 @@ struct Position {
     static const Position NONE;
 };
 
+struct PositionHash {
+    int operator()(const Position& pos) const;
+};
+
+using CellsPos = std::unordered_set<Position, PositionHash>;
+
+enum class VertexColor {
+    white,
+    grey,
+    black,
+};
+
+using CellColorMap = std::unordered_map<Position, VertexColor, PositionHash>;
+
 struct Size {
     int rows = 0;
     int cols = 0;
@@ -35,12 +52,37 @@ struct Size {
 };
 
 // Описывает ошибки, которые могут возникнуть при вычислении формулы.
-class FormulaError : public std::runtime_error {
+class FormulaError {
 public:
-    using std::runtime_error::runtime_error;
+    enum class Category {
+        Ref,    // ссылка на ячейку с некорректной позицией
+        Value,  // ячейка не может быть трактована как число
+        Arithmetic,  // в результате вычисления возникло деление на ноль
+    };
+
+    FormulaError(Category category);
+
+    Category GetCategory() const;
+
+    bool operator==(FormulaError rhs) const;
+
+    std::string_view ToString() const;
+
+    static inline std::string ARITHM_ERR_MSG = "#ARITHM!";
+    static inline std::string REF_ERR_MSG = "#REF!";
+    static inline std::string VALUE_ERR_MSG = "#VALUE!";
+
+private:
+    Category category_;
 };
 
 std::ostream& operator<<(std::ostream& output, FormulaError fe);
+
+// Исключение, выбрасываемое при попытке передать в метод некорректную позицию
+class InvalidPositionException : public std::out_of_range {
+public:
+    using std::out_of_range::out_of_range;
+};
 
 // Исключение, выбрасываемое при попытке задать синтаксически некорректную
 // формулу
@@ -49,21 +91,12 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Исключение, выбрасываемое при попытке передать в метод некорректную позицию
-class InvalidPositionException : public std::out_of_range {
-public:
-    using std::out_of_range::out_of_range;
-};
-
-// Исключение, выбрасываемое, если вставка строк/столбцов в таблицу приведёт к
-// ячейке с позицией больше максимально допустимой
-class TableTooBigException : public std::runtime_error {
+// Исключение, выбрасываемое при попытке задать формулу, которая приводит к
+// циклической зависимости между ячейками
+class CircularDependencyException : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
-
-inline constexpr char FORMULA_SIGN = '=';
-inline constexpr char ESCAPE_SIGN = '\'';
 
 class CellInterface {
 public:
@@ -73,31 +106,40 @@ public:
 
     virtual ~CellInterface() = default;
 
-    // Задаёт содержимое ячейки. Если текст начинается со знака "=", то он
-    // интерпретируется как формула. Уточнения по записи формулы:
-    // * Если текст содержит только символ "=" и больше ничего, то он не считается
-    // формулой
-    // * Если текст начинается с символа "'" (апостроф), то при выводе значения
-    // ячейки методом GetValue() он опускается. Можно использовать, если нужно
-    // начать текст со знака "=", но чтобы он не интерпретировался как формула.
-    virtual void Set(std::string text) = 0;
-
     // Возвращает видимое значение ячейки.
     // В случае текстовой ячейки это её текст (без экранирующих символов). В
     // случае формулы - числовое значение формулы или сообщение об ошибке.
     virtual Value GetValue() const = 0;
+
     // Возвращает внутренний текст ячейки, как если бы мы начали её
     // редактирование. В случае текстовой ячейки это её текст (возможно,
     // содержащий экранирующие символы). В случае формулы - её выражение.
     virtual std::string GetText() const = 0;
+
+    // Возвращает список ячеек, которые непосредственно задействованы в данной
+    // формуле. Список отсортирован по возрастанию и не содержит повторяющихся
+    // ячеек. В случае текстовой ячейки список пуст.
+    virtual std::vector<Position> GetReferencedCells() const = 0;
 };
+
+inline constexpr char FORMULA_SIGN = '=';
+inline constexpr char ESCAPE_SIGN = '\'';
 
 // Интерфейс таблицы
 class SheetInterface {
 public:
     virtual ~SheetInterface() = default;
 
-    // Задаёт содержимое ячейки.
+    // Задаёт содержимое ячейки. Если текст начинается со знака "=", то он
+    // интерпретируется как формула. Если задаётся синтаксически некорректная
+    // формула, то бросается исключение FormulaException и значение ячейки не
+    // изменяется. Если задаётся формула, которая приводит к циклической
+    // зависимости (в частности, если формула использует текущую ячейку), то
+    // бросается исключение CircularDependencyException и значение ячейки не
+    // изменяется.
+    // Уточнения по записи формулы:
+    // * Если текст содержит только символ "=" и больше ничего, то он не считается
+    // формулой
     // * Если текст начинается с символа "'" (апостроф), то при выводе значения
     // ячейки методом GetValue() он опускается. Можно использовать, если нужно
     // начать текст со знака "=", но чтобы он не интерпретировался как формула.

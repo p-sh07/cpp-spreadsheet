@@ -9,6 +9,7 @@ expr
     | (ADD | SUB) expr  # UnaryOp
     | expr (MUL | DIV) expr  # BinaryOp
     | expr (ADD | SUB) expr  # BinaryOp
+    | CELL  # Cell
     | NUMBER  # Literal
     ;
 
@@ -25,4 +26,5 @@ ADD: '+' ;
 SUB: '-' ;
 MUL: '*' ;
 DIV: '/' ;
+CELL: [A-Z]+[0-9]+ ;
 WS: [ \t\n\r]+ -> skip ;

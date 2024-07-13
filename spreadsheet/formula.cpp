@@ -6,33 +6,49 @@
 #include <cassert>
 #include <cctype>
 #include <sstream>
+#include <tuple>
 
 using namespace std::literals;
 
 std::ostream& operator<<(std::ostream& output, FormulaError fe) {
-    return output << "#ARITHM!";
+    return output << fe.ToString();
 }
 
-/* Constructor example
- * class B {
-public:
-    // Обратите внимание на этот конструктор: он использует список инициализации.
-    // Но в сам список мы передаём не готовый объект класса А, а создаём его
-    // на месте. Конструктор класса А может выкинуть исключение. Обрабатывает её прямо
-    // в списке инициализации (try catch).
-    B(args) try
-        : a_(A(args)) {
-    } catch (const std::exception& exc) {
-        // обрабатываем исключение
+FormulaError::FormulaError(Category category)
+    : category_(category) {
+}
+
+FormulaError::Category FormulaError::GetCategory() const {
+    return category_;
+}
+
+bool FormulaError::operator==(FormulaError rhs) const {
+    return category_ == rhs.GetCategory();
+}
+
+std::string_view FormulaError::ToString() const {
+    switch (category_) {
+    case Category::Arithmetic:
+        return ARITHM_ERR_MSG;
+        break;
+
+    case Category::Ref:
+        return REF_ERR_MSG;
+        break;
+
+    case Category::Value:
+        return VALUE_ERR_MSG;
+        break;
+
+    default:
+        return "";
+        break;
     }
-private:
-    А а_;
-}; */
+}
 
 namespace {
 class Formula : public FormulaInterface {
 public:
-// Реализуйте следующие методы:
     explicit Formula(std::string expression) try
         : ast_(ParseFormulaAST(std::move(expression))) {
     } catch (const std::exception& ex) {
@@ -40,9 +56,9 @@ public:
         throw FormulaException("Unable to parse Fomula");
     }
 
-    Value Evaluate() const override {
+    Value Evaluate(const SheetInterface& sheet) const override {
         try {
-            return ast_.Execute();
+            return ast_.Execute(sheet);
         } catch(FormulaError& fr) {
             return fr;
         }
@@ -57,6 +73,17 @@ public:
         }
 
         return ss.str();
+    }
+
+    std::vector<Position> GetReferencedCells() const override {
+        const auto& ref_cells_list = ast_.GetReferencedCells();
+
+        //The list from AST is already sorted
+        std::vector<Position> ref_cells(ref_cells_list.begin(), ref_cells_list.end());
+        auto end_of_unique = std::unique(ref_cells.begin(), ref_cells.end());
+
+        ref_cells.resize(end_of_unique - ref_cells.begin());
+        return ref_cells;
     }
 
 private:
