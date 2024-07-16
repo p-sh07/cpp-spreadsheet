@@ -14,15 +14,17 @@ Sheet::~Sheet() {}
 
 void Sheet::SetCell(Position pos, std::string text) {
     //1.Get existing, or make new cell
-    auto& new_added_cell = GetRefOrMakeNewCell(pos);
+    auto& cell_ref = GetRefOrMakeNewCell(pos);
 
     //2.Set Cell Value (Check for cycle inside the Cell::Set method)
-    new_added_cell->Set(pos, text);
+    if(cell_ref->GetText() != text) { //2.1.Check cell doesn't have same text already
+        cell_ref->Set(pos, text);
+    }
 
     //3.1.If the cell is beyond current print area (max/bottom right cell), increase print area
     UpdPrintAreaSize(pos);
 
-    //3.2.Increment cell in row count
+    //3.2.Increment cell in row count (num of non-empty cells contained in row)
     UpdCellInRowCount(pos);
 }
 
@@ -38,7 +40,7 @@ void Sheet::ClearCell(Position pos) {
     if(!HasCell(pos)) {
         return;
     }
-    //will not create new cell, made sure it exists
+    //will not create new cell, make sure it exists
     auto cell_ptr = GetCellRawPtr(pos);
     if(cell_ptr) {
         cell_ptr->Clear();

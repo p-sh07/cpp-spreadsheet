@@ -136,8 +136,8 @@ Cell::Value Cell::GetValue() const {
         }
     }
 
-    //3.Вернуть текст, если ячейка не содерит чисел или формулы
-    //(числовые ячейки всегда хранятся как variant<double>)
+    //3.Вернуть текст, если ячейка не содержит число или формулу
+    //(числовые ячейки, заданные строкой, всегда имеют валидный кэщ)
     if(HasString()) {
         return AsString()[0] == ESCAPE_SIGN ? AsString().substr(1) : AsString();
     }
@@ -174,6 +174,7 @@ std::vector<Position> Cell::GetDependentCells() const {
 
 void Cell::AddDependentCells(Position pos) const {
     dependent_cells_.insert(pos);
+
     for(const auto& dep_cell : sheet_.GetCell(pos)->GetDependentCells()) {
         dependent_cells_.insert(dep_cell);
     }
@@ -181,6 +182,7 @@ void Cell::AddDependentCells(Position pos) const {
 
 void Cell::RemoveDependentCells(Position pos) const {
     dependent_cells_.erase(pos);
+
     for(const auto& dep_cell : sheet_.GetCell(pos)->GetDependentCells()) {
         dependent_cells_.erase(dep_cell);
     }
@@ -266,6 +268,7 @@ bool Cell::IsEmpty() const {
     return std::holds_alternative<std::monostate>(data_variant_);
 }
 bool Cell::HasDouble() const {
+    //return std::holds_alternative<double>(data_variant_);
     return cache_.has_value();
 }
 bool Cell::HasString() const {
@@ -274,6 +277,23 @@ bool Cell::HasString() const {
 bool Cell::HasFormula() const {
     return std::holds_alternative<FormulaPtr>(data_variant_);
 }
+
+// double Cell::AsDouble() const {
+//     if(HasDouble()) {
+//         //return std::get<double>(data_variant_);
+//         return cache_.value();
+//     } else if (HasFormula()) {
+//         auto formula_result = AsFormula()->Evaluate(sheet_);
+//         if(std::holds_alternative<double>(formula_result)) {
+//             cache_ = std::get<double>(formula_result);
+//             return cache_.value();
+//         } else {
+//             throw std::get<FormulaError>(formula_result);
+//         }
+//     } else {
+//         throw std::runtime_error("Bad Double access attempt: does not hold and is not convertible to Double");
+//     }
+// }
 
 std::string Cell::AsString() const {
     if(!HasString()) {
