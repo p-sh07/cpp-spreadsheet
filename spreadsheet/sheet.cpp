@@ -14,11 +14,11 @@ Sheet::~Sheet() {}
 
 void Sheet::SetCell(Position pos, std::string text) {
     //1.Get existing, or make new cell
-    auto& cell_ref = GetRefOrMakeNewCell(pos);
+    auto& cell_ptr = GetRefOrMakeNewCell(pos);
 
     //2.Set Cell Value (Check for cycle inside the Cell::Set method)
-    if(cell_ref->GetText() != text) { //2.1.Check cell doesn't have same text already
-        cell_ref->Set(pos, text);
+    if(cell_ptr->GetText() != text) { //2.1.Check cell doesn't have same text already
+        cell_ptr->Set(pos, text);
     }
 
     //3.1.If the cell is beyond current print area (max/bottom right cell), increase print area
