@@ -34,7 +34,7 @@ struct PositionHash {
     int operator()(const Position& pos) const;
 };
 
-using CellsPos = std::unordered_set<Position, PositionHash>;
+using CellsPosSet = std::unordered_set<Position, PositionHash>;
 
 enum class VertexColor {
     white,
@@ -120,6 +120,14 @@ public:
     // формуле. Список отсортирован по возрастанию и не содержит повторяющихся
     // ячеек. В случае текстовой ячейки список пуст.
     virtual std::vector<Position> GetReferencedCells() const = 0;
+
+    //Сброс кэша ячейки (cache_ is mutable)
+    virtual void InvalidateCache() const = 0;
+
+    //Доступ и изменение зависимых ячеек (dep_cells is mutable)
+    virtual std::vector<Position> GetDependentCells() const = 0;
+    virtual void AddDependentCells(Position pos) const = 0;
+    virtual void RemoveDependentCells(Position pos) const = 0;
 };
 
 inline constexpr char FORMULA_SIGN = '=';

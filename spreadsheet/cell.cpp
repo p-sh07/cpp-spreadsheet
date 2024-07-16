@@ -5,232 +5,285 @@
 #include <string>
 #include <optional>
 #include <stack>
+#include <sstream>
 
-//========== Cell Common Public ==========
-Cell::Cell(const SheetInterface& sheet)
+///Марина, привет! Воспользовался моментом, что бы переписать реализацию через std::variant вместо наследования и Impl_
+/// (и уменьшить дублирование кода использованием шаблонных функций Cell::PerformDFS и Sheet::OutputAllCells)
+/// не знаю, насколько такая реализация лучше/хуже, мне кажется немного стало компактнее, понятнее и местами элегантнее
+/// (хотя, возможно, и реализацию с наследованием можно было просто слегка довести до ума и тоже получилось бы ок)
+/// Буду признателен за любую обратную связь по этому поводу =)
+
+/// P.S.В первой версии кода сильно усложнил себе жизнь тем, что зачем-то передавал в ячейки const SheetInterface& sheet, поэтому
+/// долго не получалось логически раскидать методы/проверки при добавлении новых ячеек. С неконстантным sheet
+/// все гораздо проще оказалось, переместил все относящееся к ячейкам методы в Сell, как было написано в замечании в первом ревью
+
+namespace{
+struct CellTextGetter {
+    const SheetInterface& sheet;
+
+    std::string operator()(std::monostate) {
+        return "";
+    }
+
+    std::string operator()(std::string str) {
+        return str;
+    }
+
+    std::string operator()(const Cell::FormulaPtr& formula) {
+        return FORMULA_SIGN + formula->GetExpression();
+    }
+};
+
+std::optional<double> StrToDouble(const std::string& txt) {
+    double conv_double;
+    std::stringstream ss(txt);
+    ss >> conv_double;
+
+    //return the double if conversion successful, otherwise nullopt
+    return (!ss.fail() && ss.eof())
+               ? std::optional<double>{conv_double}
+               : std::optional<double>{};
+}
+}//namespace
+
+//========== Cell Public ==========
+Cell::Cell(SheetInterface& sheet)
     : sheet_(sheet) {
 }
 
 Cell::~Cell() {}
 
-void Cell::Set(std::string text, Position pos) {
-    //Empty
+void Cell::Set(Position pos, std::string text) {
+    //Store pos for DFS algorithms (to identify this cell in tree)
+    pos_in_sheet_ = pos;
+
+    //1.Empty
     if(text.empty()) {
-        impl_ = std::make_unique<EmptyImpl>(sheet_);
+        Clear();
         return;
     }
+    CellData new_data;
 
-    //Formula or text
-    std::unique_ptr<Impl> new_cell_contents;
+    //2.Formula
+    if(text[0] == FORMULA_SIGN && text.size() > 1) {
+        //remove leading '=' when parsing formula string
+        auto new_formula_obj = ParseFormula(text.substr(1));
 
-    if(text[0] == FORMULA_SIGN && text.size() > 1) { //formula
-        new_cell_contents = std::make_unique<FormulaImpl>(sheet_);
-    } else { //text
-        new_cell_contents = std::make_unique<TextImpl>(sheet_);
+        if(!new_formula_obj) {
+            throw std::runtime_error("Invalid formula object returned by ParseFormula() in Cell::Set");
+        }
+
+        const auto new_cell_refs = new_formula_obj->GetReferencedCells();
+
+        if(CheckFormulaForCycle(&new_cell_refs)) {
+            throw CircularDependencyException("Circular dependency when adding new formula to cell");
+        }
+
+        //no parsing or cycle errors:
+        new_data = std::move(new_formula_obj);
     }
-    new_cell_contents->Set(text, pos);
+    //3.Text
+    else {
+        new_data = text;
 
-    //If everything worked, replace cell contents:
-    impl_ = std::move(new_cell_contents);
+        //3.1.Double as text -> store in cache and read from cache, when using in formula
+        //keep string input to preserve format for GetText (otherwise changes to 1.00000 etc)
+        if(auto dbl_opt = StrToDouble(text)) {
+            cache_ = dbl_opt.value();
+        }
+    }
+
+    //4.New cell data was processed without exceptions, swap
+    Clear();
+    std::swap(data_variant_, new_data);
+
+    //5.Add this cell to new ref cells as Dependent (if formula)
+    AddAsDependentToRefCells();
 }
 
+///Здесь немного поменялась логика, поэтому уже не сделать через Set с передачей пустой строки (как было в замечанни в ревью)
+///Надеюсь такой вариант тоже подойдет! (т.е. теперь наоборот Set("") с пустой строкой происходит через Clear() )
 void Cell::Clear() {
-    impl_ = nullptr;
+    //When changing an existing non-empty cell, process dependents and invalidate caches
+    if(!IsEmpty()) {
+        RemoveCellFromDependents();
+        InvalidateDependentCellsCaches();
+        InvalidateCache();
+    }
+    data_variant_ = std::monostate();
 }
 
 Cell::Value Cell::GetValue() const {
-    //For non-initialized cell, this will return veriant<std::string> == "";
-    return impl_ ? impl_->GetValue() : Value{};
+    //0.Для пустой ячейки возвращаем std::variant<double> == 0.0;
+    if(IsEmpty()) {
+        return 0.0;
+    }
+
+    //1.Возвращает кеш, если он есть
+    if(cache_.has_value()) {
+        return cache_.value();
+    }
+
+    //2.Записать double в кэш, если это возможно
+    if(HasFormula()) {
+        auto formula_result = AsFormula()->Evaluate(sheet_);
+
+        if(std::holds_alternative<FormulaError>(formula_result)) {
+            //Формула вернула ошибку
+            return std::get<FormulaError>(formula_result);
+        } else {
+            cache_ = std::get<double>(formula_result);
+        }
+    }
+
+    //3.Вернуть текст, если ячейка не содерит чисел или формулы
+    //(числовые ячейки всегда хранятся как variant<double>)
+    if(HasString()) {
+        return AsString()[0] == ESCAPE_SIGN ? AsString().substr(1) : AsString();
+    }
+    //4.Иначе вернуть значения заново посчитаного Кэша
+    else {
+        return cache_.value();
+    }
 }
 
 std::string Cell::GetText() const {
-    return impl_ ? impl_->GetText() : "";
+    return std::visit(CellTextGetter{sheet_}, data_variant_);
 }
 
 std::vector<Position> Cell::GetReferencedCells() const {
-    return impl_ ? impl_->GetRefCells() : std::vector<Position>{};
-}
-
-void Cell::AddDependentCell(Position pos) {
-    dependent_cells_.insert(pos);
-}
-
-const CellsPos Cell::GetDependentCells() const {
-    return dependent_cells_;
+    if(HasFormula()) {
+        return AsFormula()->GetReferencedCells();
+    }
+    return {};
 }
 
 void Cell::InvalidateCache() const {
-    if(impl_) {
-        impl_->InvalidateCache();
+    //Invalidate only for formula cells
+    if(HasFormula()) {
+        cache_.reset();
     }
 }
 
-//========== Base Cell Implementation ==========
-Cell::Impl::Impl(const SheetInterface& sheet)
-    : sheet_(sheet) {
+
+//==== Работа с зависимыми ячейками ====
+std::vector<Position> Cell::GetDependentCells() const {
+    //Store dep cells as set, to avoid duplicates. Return as vec for compatibility
+    return {dependent_cells_.begin(), dependent_cells_.end()};
 }
 
-void Cell::Impl::Set(std::string data, Position pos) {
-    text_ = std::move(data);
-}
-
-Cell::Value Cell::Impl::GetValue() const {
-    return text_;
-}
-
-std::string Cell::Impl::GetText() const {
-    return text_;
-}
-
-//Обнуляет optional
-void Cell::Impl::InvalidateCache() const {
-}
-
-std::vector<Position> Cell::Impl::GetRefCells() const {
-    return {}; //returns only for formula cell!
-}
-
-//========== Emptu Cell Implementation ==========
-Cell::Value Cell::EmptyImpl::GetValue() const {
-    return 0.0;
-}
-
-std::vector<Position> Cell::EmptyImpl::GetRefCells() const {
-    return {};
-}
-
-//========== Text Cell Implementation ==========
-//Вернет double, если в string text_ ячейки записано число
-Cell::Value Cell::TextImpl::GetValue() const {
-    if(!cache_.has_value()) {
-        try{
-            //is not number if there are any letters
-            auto it = std::find_if(text_.begin(), text_.end(), [](const char c) {
-                return std::isalpha(c);
-            });
-
-            //No letters found, try converting to double
-            if(it == text_.end()) {
-                cache_ = std::stod(text_);
-                return cache_.value();
-            }
-        } catch (std::exception& ex) {
-            //potentially, error - could not convert to double
-        }
-    } else {
-        return cache_.value();
+void Cell::AddDependentCells(Position pos) const {
+    dependent_cells_.insert(pos);
+    for(const auto& dep_cell : sheet_.GetCell(pos)->GetDependentCells()) {
+        dependent_cells_.insert(dep_cell);
     }
-    //Если не число, возвращает string
-    return text_[0] == ESCAPE_SIGN ? text_.substr(1) : text_;
 }
 
-std::vector<Position> Cell::TextImpl::GetRefCells() const {
-    return {};
-}
-
-//========== Formula Cell Implementation ==========
-void Cell::FormulaImpl::Set(std::string data, Position pos) {
-    //Parse without leading '='. Can throw FormulaException
-    formula_obj_ = ParseFormula(data.substr(1));
-
-    //Выполняет проход по ячейкам, от которых зависит. Добавляет себя в их dependent_cells_
-    if(HasCycle(pos, formula_obj_->GetReferencedCells())) {
-        throw CircularDependencyException("New Cell formula has a cyclic dependency");
+void Cell::RemoveDependentCells(Position pos) const {
+    dependent_cells_.erase(pos);
+    for(const auto& dep_cell : sheet_.GetCell(pos)->GetDependentCells()) {
+        dependent_cells_.erase(dep_cell);
     }
-
-    //Cell value (text) is only changed if no exception thrown by parsing
-    text_ = data;
 }
 
-//Возвращает кэшированное значение, если оно есть, иначе высчитывает значение формулы
-Cell::Value Cell::FormulaImpl::GetValue() const {
-    //TODO: what is the return in case !formula_obj_ ?
-    if(!cache_.has_value() && formula_obj_) {
 
-        //Проход по RefCells происходит внутри дерева формулы, вызывается cell->GetValue()
-        cache_.emplace(ConvertToCellVal(formula_obj_->Evaluate(sheet_)));
-    }
-
-    return cache_.value();
-}
-
-//Возвращает текст формулы без лишних скобок
-std::string Cell::FormulaImpl::GetText() const {
-    if(!formula_obj_) {
-        return "#err formula_obj";
-    }
-    return "=" + formula_obj_->GetExpression();
-}
-
-//Обнуляет optional
-void Cell::FormulaImpl::InvalidateCache() const {
-    cache_.reset();
-}
-
-bool Cell::FormulaImpl::HasCycle(Position start_vertex, const std::vector<Position>& start_vertex_ref_cells) {
-    //check if any of the added ref cells contain this cell
-    CellColorMap cell_colors;
-    std::stack<Position> cell_stack;
-
-    //Lambda for checking cell color in the map
-    auto is_white_vertex = [&cell_colors](const Position& pos) {
-        return cell_colors.count(pos) == 0 || cell_colors.at(pos) == VertexColor::white;
+//==== Проходы графа ячеек по DFS ====
+//Проверить формулу на циклическую зависимость
+bool Cell::CheckFormulaForCycle(const std::vector<Position>* start_cell_refs) {
+    auto next_cells_getter = [](const CellInterface* cell_ptr) {
+        return cell_ptr->GetReferencedCells();
     };
 
-    cell_stack.push(start_vertex);
+    //Ничего не делать с ячейками при проходе
+    auto function_on_cells = [](const CellInterface* cell_ptr){};
 
-    //Начать DFS
-    while(!cell_stack.empty()) {
-        Position vertex = cell_stack.top();
-        cell_stack.pop();
-
-        if(is_white_vertex(vertex)) {
-            cell_colors[vertex] = VertexColor::grey;
-
-            //положить серую вершину в стэк для нахождения обратного пути
-            cell_stack.push(vertex);
-        }
-
-        //Skip empty cells, GetCell could be nullptr!
-        auto vertex_cell_ptr = sheet_.GetCell(vertex);
-        if(!vertex_cell_ptr) {
-            continue;
-        }
-
-        //Для первой вершины мы еще не изменили ее содержание в sheet_,
-        //Поэтому нужно взять RefCells напрямую из объекта формулы
-        //(передается в функцию по ссылке)
-        const auto& ref_cells = (vertex == start_vertex)
-                                    ? start_vertex_ref_cells
-                                    : vertex_cell_ptr->GetReferencedCells();
-
-        //для каждого исходящего ребра (v,w):
-        for(const Position& ref_cell : ref_cells) {
-            if(is_white_vertex(ref_cell)) {
-                cell_stack.push(ref_cell);
-            }
-            //серая вершина попадается в стеке только на обратном пути
-            else if (cell_colors[ref_cell] == VertexColor::grey) {
-                cell_colors[ref_cell] = VertexColor::black;
-            }
-            //Черная вершина -> найден цикл!
-            else if (cell_colors[ref_cell] == VertexColor::black) {
-                return true;
-            }
-        }
-    }
-    //Нет цикла
-    return false;
+    return PerformDFS(pos_in_sheet_, next_cells_getter, function_on_cells, start_cell_refs);
 }
 
-std::vector<Position> Cell::FormulaImpl::GetRefCells() const {
-    return formula_obj_->GetReferencedCells();
+//Добавить эту ячейку в списки зависимых ячеек всем новым referenced cells
+void Cell::AddAsDependentToRefCells() {
+    //Non-dfs version
+    for(auto& ref_cell_pos : GetReferencedCells()) {
+        if(auto ref_cell_ptr =sheet_.GetCell(ref_cell_pos)) {
+            ref_cell_ptr->AddDependentCells(pos_in_sheet_);
+        }
+    }
+
+    /// Нужно ли проходить все дерево по dfs для добавления/удаления DependentCells?
+    //DFS version
+    // //Ничего не делать, если в ячейке не формула
+    // if(!HasFormula()) {
+    //     return;
+    // }
+
+    // auto next_cells_getter = [](const CellInterface* cell_ptr) {
+    //     return cell_ptr->GetReferencedCells();
+    // };
+
+    // auto function_on_cells = [&](const CellInterface* cell_ptr) {
+    //     cell_ptr->AddDependentCells(pos_in_sheet_);
+    // };
+
+    // PerformDFS(pos_in_sheet_, next_cells_getter, function_on_cells);
 }
 
-CellInterface::Value Cell::FormulaImpl::ConvertToCellVal(const FormulaInterface::Value& formula_return) const {
-    if(std::holds_alternative<double>(formula_return)) {
-        return std::get<double>(formula_return);
-    } else {
-        return std::get<FormulaError>(formula_return);
+//При изменении ячейки, удалить ее (и ее зависимости) из зависимостей своих предыдущих RefCells
+void Cell::RemoveCellFromDependents() {
+    //Non-dfs version
+    for(auto& ref_cell_pos : GetReferencedCells()) {
+        if(auto ref_cell_ptr = sheet_.GetCell(ref_cell_pos)) {
+            ref_cell_ptr->RemoveDependentCells(pos_in_sheet_);
+        }
     }
+
+    // auto next_cells_getter = [](const CellInterface* cell_ptr) {
+    //     return cell_ptr->GetReferencedCells();
+    // };
+
+    // auto function_on_cells = [&](const CellInterface* cell_ptr) {
+    //     cell_ptr->RemoveDependentCells(pos_in_sheet_);
+    // };
+
+    // PerformDFS(pos_in_sheet_, next_cells_getter, function_on_cells);
+}
+
+//При изменении ячейки, сбросить кеш всех зависимых ячеек
+void Cell::InvalidateDependentCellsCaches() {
+    auto next_cells_getter = [](const CellInterface* cell_ptr) {
+        return cell_ptr->GetDependentCells();
+    };
+
+    auto function_on_cells = [](const CellInterface* cell_ptr) {
+        cell_ptr->InvalidateCache();
+    };
+
+    PerformDFS(pos_in_sheet_, next_cells_getter, function_on_cells);
+}
+
+//==== Variant check/access =====
+//TODO: Public or Private?
+bool Cell::IsEmpty() const {
+    return std::holds_alternative<std::monostate>(data_variant_);
+}
+bool Cell::HasDouble() const {
+    return cache_.has_value();
+}
+bool Cell::HasString() const {
+    return std::holds_alternative<std::string>(data_variant_);
+}
+bool Cell::HasFormula() const {
+    return std::holds_alternative<FormulaPtr>(data_variant_);
+}
+
+std::string Cell::AsString() const {
+    if(!HasString()) {
+        throw std::runtime_error("Bad String-variant access attempt: does not hold str");
+    }
+    return std::get<std::string>(data_variant_);
+}
+const Cell::FormulaPtr& Cell::AsFormula() const {
+    if(!HasFormula()) {
+        throw std::runtime_error("Bad Formula-variant access attempt: does not hold formula");
+    }
+    return std::get<FormulaPtr>(data_variant_);
 }

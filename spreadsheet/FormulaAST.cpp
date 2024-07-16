@@ -259,11 +259,13 @@ public:
         if(std::holds_alternative<FormulaError>(result)) {
             throw std::get<FormulaError>(result);
         }
+
         //If cell is not empty, but text could not be converted to double, error
         else if(std::holds_alternative<std::string>(result)
                  && !std::get<std::string>(result).empty()) {
             throw FormulaError(FormulaError::Category::Value);
         }
+
         //return 0 for empty/non-existent cells
         else if(!std::holds_alternative<double>(result)) {
             return 0;

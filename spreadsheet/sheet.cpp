@@ -13,96 +13,38 @@ using namespace std::literals;
 Sheet::~Sheet() {}
 
 void Sheet::SetCell(Position pos, std::string text) {
-    if(!pos.IsValid()) {
-        throw InvalidPositionException("Invalid pos in SetCell()");
-    }
-
-    //Resize existing row or add new
-    UpdIndexSize(pos);
-
-    //Store cell ref to cell ptr
-    CellPtr& cell_at_pos = GetCellPtrRef(pos);
-
-    //1.Add or modify existing cell
-    if(!cell_at_pos) {
-        //This is a new cell, should ne no dependent cells
-        cell_at_pos = std::make_unique<Cell>(*this);
-    } else {
-        //go through dep cells graph & invalidate their cache
-        InvalidateDepCellsCacheDFS(pos);
-    }
+    //1.Get existing, or make new cell
+    auto& new_added_cell = GetRefOrMakeNewCell(pos);
 
     //2.Set Cell Value (Check for cycle inside the Cell::Set method)
-    cell_at_pos->Set(text, pos);
+    new_added_cell->Set(pos, text);
 
-    //TODO: How to keep Dependent cells updated ???
+    //3.1.If the cell is beyond current print area (max/bottom right cell), increase print area
+    UpdPrintAreaSize(pos);
 
-    //3.GetRefCells & add the new cell to their dependent Cells
-    for(const auto& ref_cell : cell_at_pos->GetReferencedCells()) {
-        //Here, we need to have empty cells in place for Referenced Cells
-        //GetCellPtrRef(pos) will add empty cell @ pos if it doesn't exist
-        GetCellPtrRef(ref_cell)->AddDependentCell(pos);
-    }
-
-    //If the cell is beyond current print area (max/bottom right cell), increase print area
-    IncreasePrintArea(pos);
-
-    //Upd count (for row.clear() at 0 non-nullptr cells)
+    //3.2.Increment cell in row count
     UpdCellInRowCount(pos);
 }
 
 const CellInterface* Sheet::GetCell(Position pos) const {
-    if(!pos.IsValid()) {
-        throw InvalidPositionException("Invalid pos in GetCell()");
-    }
-    return HasCell(pos) ? GetCellPtrRef(pos).get() : nullptr;
+    return GetCellRawPtr(pos);
 }
 
 CellInterface* Sheet::GetCell(Position pos) {
-    if(!pos.IsValid()) {
-        throw InvalidPositionException("Invalid pos in GetCell()");
-    }
-    return HasCell(pos) ? GetCellPtrRef(pos).get() : nullptr;
+    return GetCellRawPtr(pos);
 }
 
 void Sheet::ClearCell(Position pos) {
-    if(!pos.IsValid()) {
-        throw InvalidPositionException("Invalid pos in ClearCell()");
-    }
     if(!HasCell(pos)) {
         return;
     }
+    //will not create new cell, made sure it exists
+    auto cell_ptr = GetCellRawPtr(pos);
+    if(cell_ptr) {
+        cell_ptr->Clear();
 
-    CellPtr& cell_ptr_ref = GetCellPtrRef(pos);
-    cell_ptr_ref = nullptr;
-
-    //Delete empty row from index
-    UpdCellInRowCount(pos, -1);
-    if(num_cells_in_row_[pos.row] == 0) {
-        cell_index_[pos.row].clear();
-    }
-
-    //or, Shrink row to rightmost non-empty cell
-    else {
-        auto& cell_row = cell_index_[pos.row];
-        auto non_empty_cell_it = std::prev(cell_row.end());
-
-        //iterate backwards through all nullptrs
-        while(*non_empty_cell_it == nullptr) {
-            --non_empty_cell_it;
-        }
-        cell_row.resize(non_empty_cell_it - cell_row.begin() + 1);
-    }
-
-    //Shrink print area if cell is at edge
-    if(pos.row + 1 == print_size_.rows || pos.col + 1 == print_size_.cols) {
-        size_t max_col = 0;
-        for(const auto& row : cell_index_) {
-            if(max_col < row.size()) {
-                max_col = row.size();
-            }
-        }
-        print_size_ = {FindLastNonEmptyRow() + 1, static_cast<int>(max_col)};
+        //Upd index & print_area
+        ProcessCellClear(pos);
     }
 }
 
@@ -110,123 +52,51 @@ Size Sheet::GetPrintableSize() const {
     return print_size_;
 }
 
-void Sheet::InvalidateDepCellsCacheDFS(Position start_cell) const {
-
-    //TODO: Can re-write as general DFS algorithm and pass
-    //functional for getting outgoing vertices (e.g. for re-use with HasCycle)
-
-    //TODO: 2.Do you even need colors? Mb check for a valid cache instead? but, could have cells in graph that haven't been visited, but also have no cache (getValue() not called)
-    CellColorMap cell_colors;
-    std::stack<Position> cell_stack;
-
-    //Lambda for checking cell color in the map
-    auto is_white_vertex = [&cell_colors](const Position& pos) {
-        return cell_colors.count(pos) == 0 || cell_colors.at(pos) == VertexColor::white;
-    };
-
-    cell_stack.push(start_cell);
-
-    while(!cell_stack.empty()) {
-        Position vertex = cell_stack.top();
-        cell_stack.pop();
-
-        if(is_white_vertex(vertex)) {
-            cell_colors[vertex] = VertexColor::grey;
-
-            //положить серую вершину в стэк для нахождения обратного пути
-            cell_stack.push(vertex);
-
-            GetCellPtrRef(vertex)->InvalidateCache();
-        }
-
-        //для каждого исходящего ребра (v,w):
-        for(const Position& dep_cell : GetCellPtrRef(vertex)->GetDependentCells()) {
-            if(is_white_vertex(dep_cell)) {
-                cell_stack.push(dep_cell);
-                cell_colors[dep_cell] = VertexColor::grey;
-
-                GetCellPtrRef(dep_cell)->InvalidateCache();
-            }
-            //серая вершина попадается в стеке только на обратном пути
-            else if (cell_colors[dep_cell] == VertexColor::grey) {
-                cell_colors[dep_cell] = VertexColor::black;
-            }
-        }
-    }
-}
-
-//===== Cell::Value printing ======
-void CellValuePrinter(std::ostream& out, const Cell::Value& cv) {
-    if(std::holds_alternative<std::string>(cv)) {
-        out << std::get<std::string>(cv);
-    }
-    else if(std::holds_alternative<double>(cv)) {
-        out << std::get<double>(cv);
-    }
-    else if(std::holds_alternative<FormulaError>(cv)) {
-        out << std::get<FormulaError>(cv);
-    }
-}
-
-//TODO: Refactor using Functional !
 //index[row][col]
 void Sheet::PrintValues(std::ostream& output) const {
-    for(int row = 0; row < GetPrintableSize().rows; ++row) {
-        bool is_first = true;
-        for(int col = 0; col < GetPrintableSize().cols; ++col) {
-            if(!is_first) {
-                output << '\t';
-            }
-            is_first = false;
-
-            if(HasCell({row, col})) {
-                const CellPtr& cell_ptr = GetCellPtrRef({row,col});
-                if(cell_ptr) {
-                    CellValuePrinter(output, cell_ptr->GetValue());
-                }
-            }
-        }
-        output << '\n';
-    }
+    auto value_getter = [&](const Cell* ptr) {
+        return ptr->GetValue();
+    };
+    OutputAllCells(output, value_getter);
 }
 
 void Sheet::PrintTexts(std::ostream& output) const {
-    for(int row = 0; row < GetPrintableSize().rows; ++row) {
-        bool is_first = true;
-        for(int col = 0; col < GetPrintableSize().cols; ++col) {
-            if(!is_first) {
-                output << '\t';
-            }
-            is_first = false;
-
-            if(HasCell({row, col})) {
-                const CellPtr& cell_ptr = GetCellPtrRef({row,col});
-                if(cell_ptr) {
-                    CellValuePrinter(output, cell_ptr->GetText());
-                }
-            }
-        }
-        output << '\n';
-    }
+    auto text_getter = [&](const Cell* ptr) {
+        return ptr->GetText();
+    };
+    OutputAllCells(output, text_getter);
 }
 
-Sheet::CellPtr& Sheet::GetCellPtrRef(Position pos) {
-    if(!HasCell(pos)) {
-        SetCell(pos, ""); //->add empty cell, for ref cells
+Sheet::CellPtr& Sheet::GetRefOrMakeNewCell(Position pos) {
+    CheckCellPos(pos);
+
+    UpdIndexSize(pos);
+    auto& cell = cell_index_.at(pos.row).at(pos.col);
+
+    //do not overwrite cells that are not nullptr
+    if(cell) {
+        return cell;
     }
-    return cell_index_[pos.row][pos.col];
+
+    //make new empty cell
+    cell = std::make_unique<Cell>(*this);
+    cell->Set(pos, "");
+
+    return cell;
 }
 
-const Sheet::CellPtr& Sheet::GetCellPtrRef(Position pos) const {
-    //const cannot add new cell, but will throw if out of bounds
-    if(!HasCell(pos)) {
-        throw std::out_of_range("Trying to get cell that doesn't exist with const method");
-    }
-    return cell_index_.at(pos.row).at(pos.col);
+Cell* Sheet::GetCellRawPtr(Position pos) {
+    return HasCell(pos) ? cell_index_.at(pos.row).at(pos.col).get()
+                        : nullptr;
+}
+
+const Cell* Sheet::GetCellRawPtr(Position pos) const {
+    return HasCell(pos) ? cell_index_.at(pos.row).at(pos.col).get()
+                        : nullptr;
 }
 
 //===== Print area and index size helper func ====
-void Sheet::IncreasePrintArea(Position pos) {
+void Sheet::UpdPrintAreaSize(Position pos) {
     if(print_size_.rows <= pos.row) {
         print_size_.rows = pos.row + 1;
     }
@@ -237,6 +107,8 @@ void Sheet::IncreasePrintArea(Position pos) {
 
 //resizes index if new cell outside current scope
 void Sheet::UpdIndexSize(Position pos) {
+    CheckCellPos(pos);
+
     if(cell_index_.size() <= static_cast<size_t>(pos.row)) {
         cell_index_.resize(pos.row + 1);
     }
@@ -255,7 +127,49 @@ void Sheet::UpdCellInRowCount(Position pos, int count) {
     num_cells_in_row_[pos.row] += count;
 }
 
+void Sheet::ProcessCellClear(Position pos) {
+    //Delete empty row from index
+    UpdCellInRowCount(pos, -1);
+    if(num_cells_in_row_[pos.row] == 0) {
+        cell_index_[pos.row].clear();
+    }
+
+    //or, Shrink row to rightmost non-empty cell (at least one non-empty)
+    else {
+        auto& cell_row = cell_index_[pos.row];
+        auto non_empty_cell_it = cell_row.end();
+
+        //iterate backwards through all nullptrs
+        do{
+            --non_empty_cell_it;
+        } while (*non_empty_cell_it == nullptr
+                 && non_empty_cell_it != cell_row.begin());
+
+        cell_row.resize(non_empty_cell_it - cell_row.begin() + 1);
+    }
+
+    //Shrink print area if cell is at edge
+    if(pos.row + 1 == print_size_.rows || pos.col + 1 == print_size_.cols) {
+        size_t max_col = 0;
+        for(const auto& row : cell_index_) {
+            if(max_col < row.size()) {
+                max_col = row.size();
+            }
+        }
+        print_size_ = {FindLastNonEmptyRow() + 1, static_cast<int>(max_col)};
+    }
+}
+
+void Sheet::CheckCellPos(Position pos) const {
+    if(!pos.IsValid()) {
+        throw InvalidPositionException("Invalid pos passed to Sheet");
+    }
+}
+
 bool Sheet::HasCell(Position pos) const {
+    CheckCellPos(pos);
+
+    //Is within index sizes
     return static_cast<size_t>(pos.row) < cell_index_.size()
            && static_cast<size_t>(pos.col) < cell_index_[pos.row].size();
 }

@@ -346,6 +346,117 @@ void TestCellCircularReferences() {
     ASSERT(caught);
     ASSERT_EQUAL(sheet->GetCell("M6"_pos)->GetText(), "Ready");
 }
+void TestDependentCellHandling() {
+    auto sheet = CreateSheet();
+    sheet->SetCell("A1"_pos, "=A5");
+    sheet->SetCell("A2"_pos, "=A5");
+    sheet->SetCell("A3"_pos, "=A5");
+    sheet->SetCell("A4"_pos, "=A5");
+
+    sheet->SetCell("A5"_pos, "=A6");
+
+    ASSERT_EQUAL(sheet->GetCell("A6"_pos)->GetDependentCells().size(), 5u);
+
+    sheet->ClearCell("A5"_pos);
+
+    ASSERT_EQUAL(sheet->GetCell("A6"_pos)->GetDependentCells().size(), 0);
+}
+
+void PrintSheet(std::ostream& out, const std::unique_ptr<SheetInterface>& sheet) {
+    out << sheet->GetPrintableSize() << std::endl;
+    sheet->PrintTexts(std::cout);
+    out << std::endl;
+    sheet->PrintValues(std::cout);
+    out << std::endl;
+}
+
+void TestClearPrint() {
+    using namespace std::literals;
+
+    auto sheet = CreateSheet();
+    std::stringstream ss;
+
+    for (int i = 0; i <= 5; ++i) {
+        sheet->SetCell(Position{i, i}, std::to_string(i));
+    }
+
+    sheet->ClearCell(Position{3, 3});
+
+    for (int i = 5; i >= 0; --i) {
+        sheet->ClearCell(Position{i, i});
+        PrintSheet(ss,sheet);
+        PrintSheet(std::cout,sheet);
+    }
+    std::string ans = "(5, 5)\n0\n\t1\n\t\t2\n\n\t\t\t\t4\n\n0\n\t1\n\t\t2\n\n\t\t\t\t4\n\n(3, 3)\n0\n\t1\n\t\t2\n\n0\n\t1\n\t\t2\n\n(3, 3)\n0\n\t1\n\t\t2\n\n0\n\t1\n\t\t2\n\n(2, 2)\n0\n\t1\n\n0\n\t1\n\n(1, 1)\n0\n\n0\n\n(0, 0)\n\n"s;
+    ASSERT_EQUAL(ss.str(), ans);
+}
+
+void PrintSheet(const std::unique_ptr<SheetInterface>& sheet) {
+    std::cout << sheet->GetPrintableSize() << std::endl;
+    sheet->PrintTexts(std::cout);
+    std::cout << std::endl;
+    sheet->PrintValues(std::cout);
+    std::cout << std::endl;
+}
+
+void TestExample() {
+    auto sheet = CreateSheet();
+    sheet->SetCell("A1"_pos, "=A2 + B2");
+    sheet->SetCell("B1"_pos, "=1+(2*3)");
+
+    sheet->SetCell("A2"_pos, "1.0");
+    sheet->SetCell("B2"_pos, "2.0");
+
+    sheet->ClearCell("A2"_pos);
+
+    sheet->GetCell("A1"_pos);
+
+    //PrintSheet(sheet);
+    {
+        auto sheet = CreateSheet();
+        sheet->SetCell("A1"_pos, "1");    //a3-> a1 a2 b1 b2
+        sheet->SetCell("B1"_pos, "2");    //b3-> a1 a2 a3
+        sheet->SetCell("A2"_pos, "3");
+        sheet->SetCell("B2"_pos, "4");
+        sheet->SetCell("A3"_pos, "=A1+(A2/B1)*B2");
+        try{
+            sheet->SetCell("B3"_pos, "=A3+A1+A2");
+        } catch(...) {
+
+        }
+
+        auto cell = sheet->GetCell("A3"_pos);
+        ASSERT_EQUAL(cell->GetValue(), CellInterface::Value(7.));
+        sheet->ClearCell("A1"_pos);
+        ASSERT_EQUAL(cell->GetValue(), CellInterface::Value(6.));
+        //PrintSheet(sheet);
+    }
+}
+
+void TestCyclic2() {
+    {
+        auto sheet = CreateSheet();
+        try{
+        sheet->SetCell("A1"_pos, "=1");
+        sheet->SetCell("B2"_pos, "=1/2");
+        sheet->SetCell("A3"_pos, "(1+1)/-1");
+        sheet->SetCell("C3"_pos, "=(1+1)/(+1)");
+        sheet->SetCell("A2"_pos, "=A1");
+        } catch(...) {
+
+        }
+    }
+    {
+        try {
+        auto sheet = CreateSheet();
+        sheet->SetCell("C1"_pos, "=123");
+        sheet->SetCell("A1"_pos, "=A1");
+        } catch (...) {
+
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -369,4 +480,8 @@ int main() {
     RUN_TEST(tr, TestCellReferences);
     RUN_TEST(tr, TestFormulaIncorrect);
     RUN_TEST(tr, TestCellCircularReferences);
+    RUN_TEST(tr, TestDependentCellHandling);
+    // RUN_TEST(tr, TestClearPrint);
+    RUN_TEST(tr, TestExample);
+    RUN_TEST(tr, TestCyclic2);
 }

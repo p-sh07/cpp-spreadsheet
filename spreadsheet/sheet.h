@@ -4,13 +4,8 @@
 #include "common.h"
 
 #include <stack>
-#include <functional>
-#pragma once
-
-#include "cell.h"
-#include "common.h"
-
-#include <functional>
+#include <iostream>
+#include <type_traits>
 
 class Sheet : public SheetInterface {
 public:
@@ -28,9 +23,6 @@ public:
     void PrintValues(std::ostream& output) const override;
     void PrintTexts(std::ostream& output) const override;
 
-    const Cell* GetCellRawPtr(Position pos) const;
-    Cell* GetCellRawPtr(Position pos);
-
 private:
     using CellPtr = std::unique_ptr<Cell>;
     using CellRow = std::deque<CellPtr>;
@@ -41,19 +33,76 @@ private:
 
     Size print_size_;
 
-    //NB! this function will add new Empty cell if no cell at Pos
-    CellPtr& GetCellPtrRef(Position pos);
-    const CellPtr& GetCellPtrRef(Position pos) const;
+    Sheet::CellPtr& GetRefOrMakeNewCell(Position pos);
 
-    //Пройти по графу зависимых ячеек и сбросить их кэш
-    void InvalidateDepCellsCacheDFS(Position start_cell) const;
+    Cell* GetCellRawPtr(Position pos);
+    const Cell* GetCellRawPtr(Position pos) const;
 
-    void IncreasePrintArea(Position pos);
+    CellPtr& MakeNewCell(Position pos);
+
+    //Увеличивает размер отображаемой (печатной) области, когда ячейка выходит за пределы текущего размера
+    void UpdPrintAreaSize(Position pos);
     void UpdIndexSize(Position pos);
 
-    //По умолчанию увеличивает счетчик непустых ячеек в ряду на 1.
-    //Можно передать count = -1 для декремента
+    //По умолчанию увеличивает счетчик непустых ячеек в ряду на 1
     void UpdCellInRowCount(Position pos, int count = 1);
+
+    //Обновляет размеры индекса, счетчик непустых ячеек и PrintArea после стирания ячейки
+    void ProcessCellClear(Position pos);
+
+    //Выбросит исключение InvalidPositionException если pos не валиден
+    void CheckCellPos(Position pos) const;
+
+    //Проверяет, есть ли в графе ячейна на позиции pos
     bool HasCell(Position pos) const;
+
     int  FindLastNonEmptyRow() const;
+
+    template<typename OutputValueGetter>
+    void OutputAllCells(std::ostream& out, OutputValueGetter out_get) const;
 };
+
+namespace {
+struct CellValuePrinter {
+    std::ostream& out;
+    void operator()(std::monostate) {
+        out << "";
+    }
+    void operator()(std::string str) {
+        out << str;
+    }
+    void operator()(double dbl) {
+        out << dbl;
+    }
+    void operator()(FormulaError err) {
+        out << err;
+    }
+};
+
+}//namespace
+
+template<typename OutputValueGetter>
+void Sheet::OutputAllCells(std::ostream& out, OutputValueGetter out_get) const {
+    for(int row = 0; row < GetPrintableSize().rows; ++row) {
+        bool is_first = true;
+        for(int col = 0; col < GetPrintableSize().cols; ++col) {
+            if(!is_first) {
+                out << '\t';
+            }
+            is_first = false;
+
+            if(HasCell({row, col})) {
+                const auto cell_ptr = GetCellRawPtr({row,col});
+                if(cell_ptr) {
+                    auto cell_get_val = out_get(cell_ptr);
+                    if constexpr(std::is_same_v<Cell::Value, std::decay_t<decltype(cell_get_val)>>) {
+                        std::visit(CellValuePrinter{out}, cell_get_val);
+                    } else { //if not a variant, then it's a string
+                        out << cell_get_val;
+                    }
+                }
+            }
+        }
+        out << '\n';
+    }
+}

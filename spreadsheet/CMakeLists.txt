@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
-project(spreadsheet)
+
+project(spreadsheet-qtc LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
